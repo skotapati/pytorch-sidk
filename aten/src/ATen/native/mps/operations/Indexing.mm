@@ -282,7 +282,6 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
     CachedGraph(MPSGraph* graph) : MPSCachedGraph(graph) {}
     MPSGraphTensor* inputTensor_ = nil;
     MPSGraphTensor* outputTensor_ = nil;
-    MPSGraphTensor* scatterDataTensor_ = nil;
   };
 
   dispatch_sync(stream->queue(), ^() {
@@ -300,12 +299,14 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
     out = at::empty(out_.sizes(), out_.scalar_type(), c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
   }
 
+/**
   int64_t _apparentInputShape = 1;
   for (auto dim : self.sizes()) {
     _apparentInputShape *= dim;
   }
   MPSShape* apparentOutputShape = @[ @(total_nonzero * nDim) ];
   MPSShape* apparentInputShape = @[ @(_apparentInputShape) ];
+  */
 
   // Pseudocode:
   //
@@ -319,74 +320,18 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   @autoreleasepool {
     string key = "nonzero_out_mps" + getTensorsStringKey(self);
     auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
-      MPSDataType inputDataType = getMPSDataType(self);
-      MPSShape* inputShape = getMPSShape(self);
-
       MPSGraphTensor* inputTensor =
-          mpsGraphRankedPlaceHolder(mpsGraph, getMPSScalarType(self.scalar_type()), apparentInputShape);
-      MPSGraphTensor* scatterDataTensor = mpsGraphUnrankedPlaceHolder(mpsGraph, getMPSScalarType(out.scalar_type()));
-      MPSGraphTensor* zeroTensor = [mpsGraph constantWithScalar:0.0 dataType:inputDataType];
-      MPSGraphTensor* oneTensor = [mpsGraph constantWithScalar:1.0 dataType:MPSDataTypeInt32];
-      MPSGraphTensor* minusMaxDimTensor = [mpsGraph constantWithScalar:-maxDimensions dataType:MPSDataTypeInt32];
-      MPSGraphTensor* inputNotEqualToZeroTensor = [mpsGraph notEqualWithPrimaryTensor:inputTensor
-                                                                      secondaryTensor:zeroTensor
-                                                                                 name:nil];
-      MPSGraphTensor* maskTensor = [mpsGraph castTensor:inputNotEqualToZeroTensor
-                                                 toType:MPSDataTypeInt32
-                                                   name:@"castToInt32"];
-      MPSGraphTensor* indicesTensor = [mpsGraph cumulativeSumWithTensor:maskTensor axis:0 name:nil];
-      MPSGraphTensor* indicesMinusOneTensor = [mpsGraph subtractionWithPrimaryTensor:indicesTensor
-                                                                     secondaryTensor:oneTensor
-                                                                                name:nil];
-      MPSGraphTensor* maskedIndicesTensor = [mpsGraph selectWithPredicateTensor:inputNotEqualToZeroTensor
-                                                            truePredicateTensor:indicesMinusOneTensor
-                                                           falsePredicateTensor:minusMaxDimTensor
-                                                                           name:nil];
-      MPSGraphTensor* coordinatesTensor = [mpsGraph reshapeTensor:[mpsGraph coordinateAlongAxis:0
-                                                                                      withShape:inputShape
-                                                                                           name:nil]
-                                                        withShape:@[ @-1 ]
-                                                             name:nil];
-      if (nDim > 1) {
-        NSMutableArray<MPSGraphTensor*>* maskedIndicesTensorArray = [NSMutableArray arrayWithCapacity:nDim];
-        NSMutableArray<MPSGraphTensor*>* coordinatesTensorArray = [NSMutableArray arrayWithCapacity:nDim];
-
-        MPSGraphTensor* constantRankTensor = [mpsGraph constantWithScalar:nDim dataType:MPSDataTypeInt32];
-        maskedIndicesTensorArray[0] = [mpsGraph multiplicationWithPrimaryTensor:maskedIndicesTensor
-                                                                secondaryTensor:constantRankTensor
-                                                                           name:nil];
-        coordinatesTensorArray[0] = coordinatesTensor;
-        for (int i = 1; i < nDim; i++) {
-          maskedIndicesTensorArray[i] = [mpsGraph additionWithPrimaryTensor:maskedIndicesTensorArray[i - 1]
-                                                            secondaryTensor:oneTensor
-                                                                       name:nil];
-          coordinatesTensorArray[i] = [mpsGraph reshapeTensor:[mpsGraph coordinateAlongAxis:i
-                                                                                  withShape:inputShape
-                                                                                       name:nil]
-                                                    withShape:@[ @-1 ]
-                                                         name:nil];
-        }
-        maskedIndicesTensor = [mpsGraph concatTensors:maskedIndicesTensorArray dimension:0 interleave:YES name:nil];
-        coordinatesTensor = [mpsGraph concatTensors:coordinatesTensorArray dimension:0 interleave:YES name:nil];
-      }
-
-      MPSGraphTensor* outputTensor = [mpsGraph scatterWithDataTensor:scatterDataTensor
-                                                       updatesTensor:coordinatesTensor
-                                                       indicesTensor:maskedIndicesTensor
-                                                                axis:0
-                                                                mode:MPSGraphScatterModeSet
+          mpsGraphRankedPlaceHolder(mpsGraph, getMPSScalarType(self.scalar_type()), getMPSShape(self));
+      MPSGraphTensor* outputTensor = [mpsGraph nonZeroIndicesOfTensor:inputTensor
                                                                 name:nil];
 
       newCachedGraph->inputTensor_ = inputTensor;
-      newCachedGraph->scatterDataTensor_ = scatterDataTensor;
       newCachedGraph->outputTensor_ = outputTensor;
     });
 
-    Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_, self, apparentInputShape);
-    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_, out, apparentOutputShape);
-    Placeholder scatterPlaceholder = Placeholder(cachedGraph->scatterDataTensor_, out, apparentOutputShape);
-
-    auto feeds = dictionaryFromPlaceholders(selfPlaceholder, scatterPlaceholder);
+    Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_, self, nil);
+    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_, out, nil);
+    auto feeds = dictionaryFromPlaceholders(selfPlaceholder);
     runMPSGraph(stream, cachedGraph->graph(), feeds, outputPlaceholder);
   }
 
