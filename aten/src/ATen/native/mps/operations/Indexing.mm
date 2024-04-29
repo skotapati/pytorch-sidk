@@ -299,29 +299,11 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
     out = at::empty(out_.sizes(), out_.scalar_type(), c10::nullopt, kMPS, c10::nullopt, c10::nullopt);
   }
 
-/**
-  int64_t _apparentInputShape = 1;
-  for (auto dim : self.sizes()) {
-    _apparentInputShape *= dim;
-  }
-  MPSShape* apparentOutputShape = @[ @(total_nonzero * nDim) ];
-  MPSShape* apparentInputShape = @[ @(_apparentInputShape) ];
-  */
-
-  // Pseudocode:
-  //
-  // inputTensor     = [1,  0,  0,  3]
-  // inputNonZero    = [1,  0,  0,  1]
-  // indices         = [1,  1,  1,  2]
-  // maskedIndices   = [0, -1, -1,  1]
-  // coordinates     = [0,  1,  2,  3]
-  // scatterResult   = [0,  3]
-
   @autoreleasepool {
     string key = "nonzero_out_mps" + getTensorsStringKey(self);
     auto cachedGraph = LookUpOrCreateCachedGraph<CachedGraph>(key, [&](auto mpsGraph, auto newCachedGraph) {
       MPSGraphTensor* inputTensor =
-          mpsGraphRankedPlaceHolder(mpsGraph, getMPSScalarType(self.scalar_type()), getMPSShape(self));
+          mpsGraphRankedPlaceHolder(mpsGraph, getMPSDataType(self), getMPSShape(self));
       MPSGraphTensor* outputTensor = [mpsGraph nonZeroIndicesOfTensor:inputTensor
                                                                 name:nil];
 
@@ -329,8 +311,8 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
       newCachedGraph->outputTensor_ = outputTensor;
     });
 
-    Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_, self, nil);
-    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_, out, nil);
+    Placeholder selfPlaceholder = Placeholder(cachedGraph->inputTensor_, self);
+    Placeholder outputPlaceholder = Placeholder(cachedGraph->outputTensor_, out);
     auto feeds = dictionaryFromPlaceholders(selfPlaceholder);
     runMPSGraph(stream, cachedGraph->graph(), feeds, outputPlaceholder);
   }
